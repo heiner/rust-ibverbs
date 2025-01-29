@@ -6,10 +6,7 @@ fn main() {
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("failed to get current directory");
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     println!("cargo:include={manifest_dir}/vendor/rdma-core/build/include");
-    println!(
-        "cargo:rustc-link-search=native={manifest_dir}/vendor/rdma-core/build/lib;{}",
-        out_path.to_str().unwrap()
-    );
+    println!("cargo:rustc-link-search=native={manifest_dir}/vendor/rdma-core/build/lib");
     println!("cargo:rustc-link-lib=ibverbs");
 
     if Path::new("vendor/rdma-core/CMakeLists.txt").exists() {
@@ -50,10 +47,12 @@ fn main() {
         .to_str()
         .expect("build directory path is not valid UTF-8");
 
+    let verb_h = "vendor/rdma-core/libibverbs/verbs.h";
+
     // generate the bindings
     eprintln!("run bindgen");
     let bindings = bindgen::Builder::default()
-        .header("vendor/rdma-core/libibverbs/verbs.h")
+        .header(verb_h)
         .clang_arg(format!("-I{built_in}/include/"))
         .allowlist_function("ibv_.*")
         .allowlist_type("ibv_.*")
@@ -81,6 +80,56 @@ fn main() {
         .size_t_is_usize(true)
         .generate()
         .expect("Unable to generate bindings");
+
+    let output_path = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    // This is the path to the object file.
+    let obj_path = output_path.join("extern.o");
+    // This is the path to the static library file.
+    let lib_path = output_path.join("libextern.a");
+
+    // Compile the generated wrappers into an object file.
+    let mut clang = std::process::Command::new("clang");
+    clang
+        .arg("-O")
+        .arg("-c")
+        .arg("-o")
+        .arg(&obj_path)
+        .arg(std::env::temp_dir().join("bindgen").join("extern.c"))
+        .arg("-include")
+        .arg(verb_h)
+        .arg("-I.");
+
+    let clang_output = clang.output().unwrap();
+
+    eprintln!("clang {:?}", clang.get_args().collect::<Vec<_>>());
+
+    if !clang_output.status.success() {
+        panic!(
+            "Could not compile object fileXXX:\n{}",
+            String::from_utf8_lossy(&clang_output.stderr)
+        );
+    }
+
+    let lib_output = Command::new("ar")
+        .arg("rcs")
+        .arg(lib_path)
+        .arg(obj_path)
+        .output()
+        .unwrap();
+    if !lib_output.status.success() {
+        panic!(
+            "Could not emit library file:\n{}",
+            String::from_utf8_lossy(&lib_output.stderr)
+        );
+    }
+
+    println!(
+        "cargo:rustc-link-search=native={}",
+        output_path.to_string_lossy()
+    );
+
+    // Tell cargo to statically link against the `libextern` static library.
+    println!("cargo:rustc-link-lib=static=extern");
 
     // write the bindings to the $OUT_DIR/bindings.rs file.
     bindings
